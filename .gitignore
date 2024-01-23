@@ -1,0 +1,7 @@
+.terraform*
+*tfstate*
+*.log
+.vscode
+node_modules
+wordpress.xml
+*.tfvars
