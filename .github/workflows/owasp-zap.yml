@@ -1,0 +1,231 @@
+name: DAST
+
+on: [workflow_call]
+
+jobs:
+  DAST:
+    runs-on: self-hosted
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+          ref: develop
+
+      - name: Waiting for the reconciliation time for ArgoCD
+        run: sleep 180
+
+      - name: Running the OWASP ZAP tool
+        run: docker run -d -u zap -p 8080:8080 -i owasp/zap2docker-stable zap.sh -daemon -host 0.0.0.0 -port 8080 -config api.addrs.addr.name=.* -config api.addrs.addr.regex=true -config api.key=${{ secrets.OWASP_ZAP_API_KEY }}
+
+      - name: Pausing for 30 seconds
+        run: sleep 30
+
+      - name: Executing the spider
+        run: curl "${{ vars.OWSAP_URL }}/JSON/spider/action/scan/?apikey=${{ secrets.OWASP_ZAP_API_KEY }}&url=${{ vars.APPLICATION_URL }}&maxChildren=&recurse=true&contextName=&subtreeOnly="
+
+      - name: Pausing for 10 seconds
+        run: sleep 10
+
+      - name: Obtaining the ScanId
+        id: scan_id
+        run: |
+          scanId=$(curl "${{ vars.OWSAP_URL }}/JSON/ascan/action/scan/?apikey=${{ secrets.OWASP_ZAP_API_KEY }}&recurse=true&inScopeOnly=&scanPolicyName=&method=&postData=&contextId=&url=${{ vars.APPLICATION_URL }}" | jq -r ".scan" ) 
+          echo "scan id is $scanId" 
+          echo "scanId=$scanId" >> $GITHUB_OUTPUT
+
+      - name: Run scan
+        id: scan
+        run: |
+          stat=50;
+          while [ "$stat" != 100 ]; do
+            stat=$(curl "${{ vars.OWSAP_URL }}/JSON/ascan/view/status/?apikey=${{ secrets.OWASP_ZAP_API_KEY }}&scanId=${{ steps.scan_id.outputs.scanId }}" | jq -r ".status");
+            sleep 5;
+          done
+          high_alerts=$(curl "${{ vars.OWSAP_URL }}/JSON/alert/view/alertsSummary/?apikey=${{ secrets.OWASP_ZAP_API_KEY }}&baseurl=${{ vars.APPLICATION_URL }}" | jq -r ".alertsSummary.High")
+          sleep 10;
+          medium_alerts=$(curl "${{ vars.OWSAP_URL }}/JSON/alert/view/alertsSummary/?apikey=${{ secrets.OWASP_ZAP_API_KEY }}&baseurl=${{ vars.APPLICATION_URL }}" | jq -r ".alertsSummary.Medium")
+          echo "high_alerts=$high_alerts"  >> $GITHUB_OUTPUT
+          echo "medium_alerts=$medium_alerts" >> $GITHUB_OUTPUT
+
+      - name: Create Report
+        run: curl "${{ vars.OWSAP_URL }}/OTHER/core/other/jsonreport/?apikey=${{ secrets.OWASP_ZAP_API_KEY }}" | jq . > zap-scan-results.json
+
+      - name: Extract branch name
+        shell: bash
+        run: echo "branch=$(echo ${GITHUB_REF#refs/heads/})" >> $GITHUB_OUTPUT
+        id: extract_branch
+
+      - name: Extract commit id
+        shell: bash
+        run: echo "id=$(git rev-parse --short "$GITHUB_SHA")" >> $GITHUB_OUTPUT
+        id: commit_id
+
+      - name: Create Payload file
+        run: |
+          jq "{ \"messageType\": \"CodeScanReport\", \"reportType\": \"OWASP-Zap\", \
+          \"createdAt\": $(date +\"%Y-%m-%dT%H:%M:%S.%3NZ\"), \"source_repository\":  \"${GITHUB_REPOSITORY#*/}\" , \
+          \"source_branch\": \"${{ steps.extract_branch.outputs.branch }}\", \
+          \"source_commitid\": \"${{ steps.commit_id.outputs.id }}\", \
+          \"report\": . }" zap-scan-results.json > payload.json
+          aws lambda invoke --function-name security-hub-lambda --cli-binary-format raw-in-base64-out --payload file://payload.json owaspzap_scan_report.json && echo "LAMBDA_SUCCEDED" || echo "LAMBDA_FAILED";
+
+      - name: Removing the container
+        run: docker rm -f $(docker ps -a -q)
+
+      #   - name: Check the condition
+      #     run: >
+      #       if [ ${{ steps.scan.outputs.high_alerts }} != 0 ] || [ ${{ steps.scan.outputs.medium_alerts }} != 0 ];
+      #       then echo "there are high or medium alerts.. failing the build" && exit 1; else exit 0; fi
+
+      # - name: Sending a message to the Slack channel when the process fails
+      #   uses: slackapi/slack-github-action@v1.24.0
+      #   with:
+      #     channel-id: ${{ secrets.CHANNEL_ID }}
+      #     payload: |
+      #       {
+      #           "text": "GitHub Action Pipeline Failed",
+      #           "blocks": [
+      #               {
+      #                   "type": "header",
+      #                   "text": {
+      #                       "type": "plain_text",
+      #                       "text": ":exclamation: GitHub Action Pipeline Failed :exclamation:",
+      #                       "emoji": true
+      #                   }
+      #               },
+      #               {
+      #                   "type": "divider"
+      #               },
+      #               {
+      #                   "type": "section",
+      #                   "fields": [
+      #                       {
+      #                           "type": "mrkdwn",
+      #                           "text": "*Status:*\n:x: ${{ job.status }}"
+      #                       },
+      #                       {
+      #                           "type": "mrkdwn",
+      #                           "text": "*User Commit:*\n${{ github.actor }}"
+      #                       },
+      #                       {
+      #                           "type": "mrkdwn",
+      #                           "text": "*Commit ID:*\n${{ github.sha }}"
+      #                       },
+      #                       {
+      #                         "type": "mrkdwn",
+      #                         "text": "*Job Name:*\nOWSAP-ZAP"
+      #                       }
+      #                   ]
+      #               },
+      #               {
+      #                   "type": "section",
+      #                   "text": {
+      #                       "type": "mrkdwn",
+      #                       "text": "*:mag: More Information:*\nThe pipeline failed during the testing phase. Please review the logs for more details."
+      #                   }
+      #               },
+      #               {
+      #                   "type": "section",
+      #                   "text": {
+      #                       "type": "mrkdwn",
+      #                       "text": "<https://github.com/tinhtq/cicdpipeline/actions/runs/${{ github.run_id }}>"
+      #                   }
+      #               }
+      #           ]
+      #       }
+      #   env:
+      #     SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+      #   if: failure()
+
+      # - name: Send a message to the Slack channel after the pipeline is finished
+      #   uses: slackapi/slack-github-action@v1.24.0
+      #   with:
+      #     channel-id: ${{ secrets.CHANNEL_ID }}
+      #     payload: |
+      #       {
+      #           "blocks": [
+      #               {
+      #                   "type": "header",
+      #                   "text": {
+      #                       "type": "plain_text",
+      #                       "text": ":white_check_mark: GitHub Action Pipeline Succeeded :white_check_mark:"
+      #                   }
+      #               },
+      #               {
+      #                   "type": "divider"
+      #               },
+      #               {
+      #                   "type": "section",
+      #                   "fields": [
+      #                       {
+      #                           "type": "mrkdwn",
+      #                           "text": "*Status:*\n:white_check_mark: Succeeded"
+      #                       },
+      #                       {
+      #                           "type": "mrkdwn",
+      #                           "text": "*User Commit:*\n${{ github.actor }}"
+      #                       },
+      #                       {
+      #                           "type": "mrkdwn",
+      #                           "text": "*Commit ID:*\n${{ github.sha }}"
+      #                       },
+      #                       {
+      #                           "type": "mrkdwn",
+      #                           "text": "*Job Name:*\n${{ github.workflow }}"
+      #                       }
+      #                   ]
+      #               },
+      #               {
+      #                   "type": "section",
+      #                   "text": {
+      #                       "type": "mrkdwn",
+      #                       "text": "*More Information:*\nThe pipeline succeeded. Great job!"
+      #                   }
+      #               },
+      #               {
+      #                   "type": "divider"
+      #               },
+      #               {
+      #                   "type": "section",
+      #                   "text": {
+      #                       "type": "mrkdwn",
+      #                       "text": "This is the staging app URL. Click the link below to access the app:"
+      #                   }
+      #               },
+      #               {
+      #                   "type": "section",
+      #                   "text": {
+      #                       "type": "mrkdwn",
+      #                       "text": "<https://app-staging.agileops.dev/>"
+      #                   }
+      #               },
+      #               {
+      #                   "type": "section",
+      #                   "text": {
+      #                       "type": "mrkdwn",
+      #                       "text": "*You need approval to deploy into the production environment.*\nPlease visit the following link for approval:\n<https://argocd-prod.agileops.dev/applications/argocd/prod>"
+      #                   }
+      #               },
+      #               {
+      #                   "type": "divider"
+      #               },
+      #               {
+      #                   "type": "section",
+      #                   "text": {
+      #                       "type": "mrkdwn",
+      #                       "text": "*Workflow Details:*\n"
+      #                   }
+      #               },
+      #               {
+      #                   "type": "section",
+      #                   "text": {
+      #                       "type": "mrkdwn",
+      #                       "text": "<https://github.com/tinhtq/cicdpipeline/actions/runs/${{ github.run_id }}>"
+      #                   }
+      #               }
+      #           ]
+      #       }
+      #   env:
+      #     SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+      #   if: success()

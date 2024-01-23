@@ -1,0 +1,67 @@
+name: Deploy-k8s
+
+on: [workflow_call]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: develop
+
+      - uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-region: us-east-1
+
+      - name: Login to Amazon ECR Public
+        id: login-ecr-public
+        uses: aws-actions/amazon-ecr-login@v1
+        with:
+          registry-type: public
+
+      - name: Set up python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      - name: Change the deployment file
+        run: |
+          cd deployment
+          echo "apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: app-deployment
+            labels:
+              app: python
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: python
+            template:
+              metadata:
+                labels:
+                  app: python
+              spec:
+                containers:
+                - name: python
+                  image: ${{ steps.login-ecr-public.outputs.registry }}/${{ secrets.REGISTRY_ALIAS }}/${{ secrets.REPOSITORY }}:${{ vars.MAJOR }}.${{ vars.MINOR }}
+                  ports:
+                  - containerPort: 5000" > deployment.yml
+
+      - name: Auto-Commit
+        uses: stefanzweifel/git-auto-commit-action@v4
+        with:
+          commit_message: "Change Deployment"
+
+      - name: Increasement version
+        id: increasement
+        run: |
+          version=$((${{ vars.MINOR }}+1))
+          echo "version=$version" >> $GITHUB_OUTPUT
+
+      - name: Set the variable
+        run: gh variable set MINOR -b ${{ steps.increasement.outputs.version }}

@@ -1,0 +1,168 @@
+name: SYNK
+
+on: [workflow_call]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: develop
+
+      - name: Install snyk
+        run: npm install -g snyk
+        continue-on-error: true
+
+      - name: Snyk config
+        run: snyk config set api=${{ secrets.SNYK_API_SECRET }}
+
+      - name: Set up python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        with:
+          aws-region: us-east-1
+
+      - name: Login to Amazon ECR Public
+        id: login-ecr-public
+        uses: aws-actions/amazon-ecr-login@v2
+        with:
+          registry-type: public
+
+      - name: Build, tag docker image to Amazon ECR
+        env:
+          REGISTRY: ${{ steps.login-ecr-public.outputs.registry }}
+          REPOSITORY: ${{ secrets.REPOSITORY }}
+          REGISTRY_ALIAS: ${{ secrets.REGISTRY_ALIAS }}
+          IMAGE_TAG: ${{ vars.MAJOR }}.${{ vars.MINOR }}
+        run: |
+          echo $REGISTRY
+          docker build -t $REGISTRY/$REGISTRY_ALIAS/$REPOSITORY:$IMAGE_TAG .
+
+      - name: Scan the image
+        run: >
+          snyk container test ${{ steps.login-ecr-public.outputs.registry }}/${{ secrets.REGISTRY_ALIAS }}/${{ secrets.REPOSITORY }}:${{ vars.MAJOR }}.${{ vars.MINOR }}
+          --file=Dockerfile --json --severity-threshold=high --json-file-output=./snyk-results.json
+        continue-on-error: true
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        env:
+          REGISTRY: ${{ steps.login-ecr-public.outputs.registry }}
+          REPOSITORY: ${{ secrets.REPOSITORY }}
+          REGISTRY_ALIAS: ${{ secrets.REGISTRY_ALIAS }}
+          IMAGE_TAG: ${{ vars.MAJOR }}.${{ vars.MINOR }}
+        with:
+          image-ref: $REGISTRY/$REGISTRY_ALIAS/$REPOSITORY:$IMAGE_TAG
+          format: "table"
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: "os,library"
+          severity: "CRITICAL,HIGH"
+        continue-on-error: true
+
+      - name: Extract branch name
+        shell: bash
+        run: echo "branch=$(echo ${GITHUB_REF#refs/heads/})" >> $GITHUB_OUTPUT
+        id: extract_branch
+
+      - name: Extract commit id
+        shell: bash
+        run: echo "id=$(git rev-parse --short "$GITHUB_SHA")" >> $GITHUB_OUTPUT
+        id: commit_id
+
+      - name: Transfer body
+        run: |
+          jq "{ \"messageType\": \"CodeScanReport\", \"reportType\": \"SNYK\", \
+          \"createdAt\": $(date +\"%Y-%m-%dT%H:%M:%S.%3NZ\"), \"source_repository\":  \"${GITHUB_REPOSITORY#*/}\" , \
+          \"source_branch\": \"${{ steps.extract_branch.outputs.branch }}\", \
+          \"source_commitid\": \"${{ steps.commit_id.outputs.id }}\", \
+          \"report\": . }" snyk-results.json > payload.json
+
+      - name: Push docker image to Amazon ECR
+        env:
+          REGISTRY: ${{ steps.login-ecr-public.outputs.registry }}
+          REPOSITORY: ${{ secrets.REPOSITORY }}
+          REGISTRY_ALIAS: ${{ secrets.REGISTRY_ALIAS }}
+          IMAGE_TAG: ${{ vars.MAJOR }}.${{ vars.MINOR }}
+        run: docker push $REGISTRY/$REGISTRY_ALIAS/$REPOSITORY:$IMAGE_TAG
+
+      - name: Check condition
+        run: |
+          aws lambda invoke --function-name security-hub-lambda --cli-binary-format raw-in-base64-out --payload file://payload.json snyk-results.json && echo "LAMBDA_SUCCEDED" || echo "LAMBDA_FAILED";
+          if (grep -E 'critical' payload.json | grep -v '0 critical' | grep -v 'No high or critical severity vulnerabilities'); then 
+            echo "There are critical vulnerabilities.. failing the build"
+            exit 1;
+          fi
+          printf '[{"name":"hello-k8s","imageUri":"%s"}]' $REPOSITORY_URI:$TAG > build.json
+
+      - name: Remove image in local
+        run: docker image rm ${{ steps.login-ecr-public.outputs.registry }}/${{ secrets.REGISTRY_ALIAS }}/${{ secrets.REPOSITORY }}:${{ vars.MAJOR }}.${{ vars.MINOR }}
+
+      # - name: Sending a message to the Slack channel when the process fails
+      #   uses: slackapi/slack-github-action@v1.24.0
+      #   with:
+      #     channel-id: ${{ secrets.CHANNEL_ID }}
+      #     payload: |
+      #       {
+      #           "text": "GitHub Action Pipeline Failed",
+      #           "blocks": [
+      #               {
+      #                   "type": "header",
+      #                   "text": {
+      #                       "type": "plain_text",
+      #                       "text": ":exclamation: GitHub Action Pipeline Failed :exclamation:",
+      #                       "emoji": true
+      #                   }
+      #               },
+      #               {
+      #                   "type": "divider"
+      #               },
+      #               {
+      #                   "type": "section",
+      #                   "fields": [
+      #                       {
+      #                           "type": "mrkdwn",
+      #                           "text": "*Status:*\n:x: ${{ job.status }}"
+      #                       },
+      #                       {
+      #                           "type": "mrkdwn",
+      #                           "text": "*User Commit:*\n${{ github.actor }}"
+      #                       },
+      #                       {
+      #                           "type": "mrkdwn",
+      #                           "text": "*Commit ID:*\n${{ github.sha }}"
+      #                       },
+      #                       {
+      #                         "type": "mrkdwn",
+      #                         "text": "*Job Name:*\nSNYK"
+      #                       }
+      #                   ]
+      #               },
+      #               {
+      #                   "type": "section",
+      #                   "text": {
+      #                       "type": "mrkdwn",
+      #                       "text": "*:mag: More Information:*\nThe pipeline failed during the testing phase. Please review the logs for more details."
+      #                   }
+      #               },
+      #               {
+      #                   "type": "section",
+      #                   "text": {
+      #                       "type": "mrkdwn",
+      #                       "text": "<https://github.com/tinhtq/cicdpipeline/actions/runs/${{ github.run_id }}>"
+      #                   }
+      #               }
+      #           ]
+      #       }
+      #   env:
+      #     SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+      #   if: failure()

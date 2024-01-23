@@ -1,0 +1,20 @@
+name: DevSecOps Pipeline
+
+on: [pull_request]
+
+jobs:
+  git-secrets:
+    uses: ./.github/workflows/secrets.yml
+    secrets: inherit
+  snyk:
+    needs: [git-secrets]
+    uses: ./.github/workflows/snyk.yml
+    secrets: inherit
+  deploy:
+    needs: [snyk]
+    uses: ./.github/workflows/deploy-k8s.yml
+    secrets: inherit
+  dast:
+    needs: [deploy]
+    uses: ./.github/workflows/owasp-zap.yml
+    secrets: inherit
