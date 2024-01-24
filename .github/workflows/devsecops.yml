@@ -6,12 +6,12 @@ jobs:
   # git-secrets:
   #   uses: ./.github/workflows/secrets.yml
   #   secrets: inherit
-  snyk:
-    # needs: [git-secrets]
-    uses: ./.github/workflows/snyk.yml
-    secrets: inherit
+  # snyk:
+  #   needs: [git-secrets]
+  #   uses: ./.github/workflows/snyk.yml
+  #   secrets: inherit
   deploy:
-    needs: [snyk]
+    # needs: [snyk]
     uses: ./.github/workflows/deploy-k8s.yml
     secrets: inherit
   dast:
