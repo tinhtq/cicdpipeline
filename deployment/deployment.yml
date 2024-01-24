@@ -15,7 +15,7 @@ spec:
         app: python
     spec:
       containers:
-        - name: python
-          image: public.ecr.aws/i2m1c7p0/fastapi:1.70
-          ports:
-            - containerPort: 5000
+      - name: python
+        image: /i2m1c7p0/fastapi:1.0
+        ports:
+        - containerPort: 5000
