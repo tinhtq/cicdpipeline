@@ -1,6 +1,6 @@
 resource "aws_instance" "web" {
   ami                         = data.aws_ami.ubuntu.id
-  instance_type               = "t3.medium"
+  instance_type               = "t3.large"
   vpc_security_group_ids      = [aws_security_group.sg.id]
   iam_instance_profile        = aws_iam_instance_profile.ec2_profile.name
   key_name                    = aws_key_pair.ec2.id
@@ -21,15 +21,6 @@ resource "aws_instance" "web" {
       "sudo apt update -y",
       "kubectl create namespace argocd",
       "kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml",
-      "export KUBECONFIG=~/.kube/config",
-      "mkdir ~/.kube 2> /dev/null",
-      "sudo k3s kubectl config view --raw > \"$KUBECONFIG\"",
-      "chmod 600 \"$KUBECONFIG\"",
-      "sudo apt update -y",
-      "curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash",
-      "helm repo add falcosecurity https://falcosecurity.github.io/charts",
-      "helm repo update",
-      "helm install falco falcosecurity/falco --namespace falco --create-namespace --set falcosidekick.enabled=true --set falcosidekick.webui.enabled=true --set config.aws.cloudwatchlogs.loggroup=falco"
     ]
   }
 }
