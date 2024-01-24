@@ -11,16 +11,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: aws-actions/configure-aws-credentials@v2
-        with:
-          aws-region: us-east-1
-
-      - name: Login to Amazon ECR Public
-        id: login-ecr-public
-        uses: aws-actions/amazon-ecr-login@v2
-        with:
-          registry-type: public
-
       - name: Set up python
         uses: actions/setup-python@v4
         with:
