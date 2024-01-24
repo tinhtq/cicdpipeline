@@ -10,7 +10,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: develop
 
       - uses: aws-actions/configure-aws-credentials@v2
         with:
@@ -53,7 +52,7 @@ jobs:
                   - containerPort: 5000" > deployment.yml
 
       - name: Auto-Commit
-        uses: stefanzweifel/git-auto-commit-action@v4
+        uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "Change Deployment"
 
